@@ -29,6 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           cp scripts/temp-132758-validation.sh "$RUNNER_TEMP/validate-132758.sh"
+          git fetch --no-tags https://github.com/openclaw/openclaw.git "$BASE_SHA"
           git reset --hard "$BASE_SHA"
           test "$(git rev-parse HEAD)" = "$BASE_SHA"
 
