@@ -113,8 +113,9 @@ jobs:
             exit 1
           fi
           grep -F 'ignores stored CLI session candidates when the backend disables sessions' "$RUNNER_TEMP/red.log" >/dev/null
-          grep -F 'prior sessionless context' "$RUNNER_TEMP/red.log" >/dev/null
-          echo "RED_PROOF=prepare.test.ts failed on the new sessionless-history assertion" >> "$GITHUB_ENV"
+          grep -F 'the given combination of arguments (undefined and string) is invalid for this assertion' "$RUNNER_TEMP/red.log" >/dev/null
+          grep -F 'src/agents/cli-runner/prepare.test.ts:4680:43' "$RUNNER_TEMP/red.log" >/dev/null
+          echo "RED_PROOF=prepare.test.ts failed because openClawHistoryPrompt was undefined in the sessionless-history regression" >> "$GITHUB_ENV"
 
       - name: Restore base after red proof
         shell: bash
@@ -158,24 +159,26 @@ jobs:
                   : params.cliSessionId
                     ? { mode: "reuse", sessionId: params.cliSessionId }
                     : { mode: "none" };'''
-          new_candidate = '''    const configuredCliSessionCandidate: CliReusableSession = controlOperationCliSessionId
-              ? { mode: "reuse", sessionId: controlOperationCliSessionId }
-              : params.cliSessionBinding
-                ? resolveCliSessionReuse({
-                    binding: params.cliSessionBinding,
-                    authProfileId: effectiveAuthProfileId,
-                    authEpoch,
-                    authEpochVersion: CLI_AUTH_EPOCH_VERSION,
-                    extraSystemPromptHash,
-                    messageToolPolicyHash,
-                    promptToolNamesHash,
-                    cwdHash,
-                    mcpConfigHash: preparedBackendFinal.mcpConfigHash,
-                    mcpResumeHash: preparedBackendFinal.mcpResumeHash,
-                  })
-                : params.cliSessionId
-                  ? { mode: "reuse", sessionId: params.cliSessionId }
-                  : { mode: "none" };
+          new_candidate = '''    const configuredCliSessionCandidate: CliReusableSession = isSideQuestion
+              ? { mode: "none" }
+              : controlOperationCliSessionId
+                ? { mode: "reuse", sessionId: controlOperationCliSessionId }
+                : params.cliSessionBinding
+                  ? resolveCliSessionReuse({
+                      binding: params.cliSessionBinding,
+                      authProfileId: effectiveAuthProfileId,
+                      authEpoch,
+                      authEpochVersion: CLI_AUTH_EPOCH_VERSION,
+                      extraSystemPromptHash,
+                      messageToolPolicyHash,
+                      promptToolNamesHash,
+                      cwdHash,
+                      mcpConfigHash: preparedBackendFinal.mcpConfigHash,
+                      mcpResumeHash: preparedBackendFinal.mcpResumeHash,
+                    })
+                  : params.cliSessionId
+                    ? { mode: "reuse", sessionId: params.cliSessionId }
+                    : { mode: "none" };
             const reusableCliSessionCandidate: CliReusableSession = ignoreCliSessionCandidate
               ? { mode: "none" }
               : configuredCliSessionCandidate;'''
@@ -262,6 +265,46 @@ jobs:
               expect(transcriptCheck).not.toHaveBeenCalled();'''
           replace_once(prepare_test, assert_anchor, assert_replacement, "prepare regression assertions")
 
+          insert_anchor = '''  it("checks claude-cli transcript content under the resolved cwd", async () => {'''
+          auth_test = '''  it("does not raw-reseed auth-boundary history for sessionless backends", async () => {
+              fixture.appendTranscript({
+                id: "msg-sessionless-auth",
+                parentId: null,
+                timestamp: new Date(1).toISOString(),
+                message: { role: "user", content: "previous credential context", timestamp: 1 },
+              });
+              setCliBackendForPrepareTest({
+                sessionMode: "none",
+                reseedFromRawTranscriptWhenUncompacted: true,
+              });
+              const transcriptCheck = vi.fn(async () => true);
+              const orphanCheck = vi.fn(async () => false);
+              setCliRunnerPrepareTestDeps({
+                claudeCliSessionTranscriptHasContent: transcriptCheck,
+                claudeCliSessionTranscriptHasOrphanedToolUse: orphanCheck,
+              });
+
+              const context = await fixture.prepare({
+                sessionKey: "agent:main:telegram:direct:peer",
+                prompt: "new credential ask",
+                provider: "claude-cli",
+                model: "opus",
+                cliSessionBinding: {
+                  sessionId: "stale-credential-session",
+                  authProfileId: "anthropic:old-profile",
+                },
+                cliSessionId: "stale-credential-session",
+              });
+
+              expect(context.reusableCliSession).toEqual({ mode: "none" });
+              expect(context.openClawHistoryPrompt).toBeUndefined();
+              expect(transcriptCheck).not.toHaveBeenCalled();
+              expect(orphanCheck).not.toHaveBeenCalled();
+            });
+
+          ''' + insert_anchor
+          replace_once(prepare_test, insert_anchor, auth_test, "sessionless auth-boundary regression")
+
           history_test = "src/agents/cli-runner/session-history.test.ts"
           table_anchor = '''    "mcp",
               "session-expired",
@@ -307,7 +350,7 @@ jobs:
         run: |
           set -euo pipefail
           git config user.name "Sylvester Kaczmarek"
-          git config user.email "sylvesterkaczmarek@users.noreply.github.com"
+          git config user.email "16242628+sylvesterkaczmarek@users.noreply.github.com"
           git add \
             src/agents/cli-runner/prepare.ts \
             src/agents/cli-runner/prepare.test.ts \
