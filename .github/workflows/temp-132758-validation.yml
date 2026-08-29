@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  BASE_SHA: 0f2211294740cf855c64f09cc73bb45ce7cf0964
+  BASE_SHA: dc17d248cc62ac2ba6d754787c1fe99edf1d396f
   TARGET_BRANCH: fix/132758-none-mode-history-reseed
   NODE_VERSION: "24.19.0"
 
@@ -39,7 +39,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           install-bun: "false"
 
-      - name: Add regression only
+      - name: Re-prove regression on current base
         shell: bash
         run: |
           set -euo pipefail
@@ -49,60 +49,55 @@ jobs:
           path = Path("src/agents/cli-runner/prepare.test.ts")
           text = path.read_text()
           anchor = '''  it("ignores stored CLI session candidates when the backend disables sessions", async () => {
-              setCliBackendForPrepareTest({'''
+            setCliBackendForPrepareTest({'''
           replacement = '''  it("ignores stored CLI session candidates when the backend disables sessions", async () => {
-              fixture.appendTranscript({
-                id: "msg-sessionless-user",
-                parentId: null,
-                timestamp: new Date(1).toISOString(),
-                message: {
-                  role: "user",
-                  content: "prior sessionless context",
-                  timestamp: 1,
+            fixture.appendTranscript({
+              id: "msg-sessionless-user",
+              parentId: null,
+              timestamp: new Date(1).toISOString(),
+              message: {
+                role: "user",
+                content: "prior sessionless context",
+                timestamp: 1,
+              },
+            });
+            fixture.appendTranscript({
+              id: "msg-sessionless-assistant",
+              parentId: "msg-sessionless-user",
+              timestamp: new Date(2).toISOString(),
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "prior sessionless answer" }],
+                api: "responses",
+                provider: "test-cli",
+                model: "test-model",
+                usage: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  totalTokens: 0,
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
                 },
-              });
-              fixture.appendTranscript({
-                id: "msg-sessionless-assistant",
-                parentId: "msg-sessionless-user",
-                timestamp: new Date(2).toISOString(),
-                message: {
-                  role: "assistant",
-                  content: [{ type: "text", text: "prior sessionless answer" }],
-                  api: "responses",
-                  provider: "test-cli",
-                  model: "test-model",
-                  usage: {
-                    input: 0,
-                    output: 0,
-                    cacheRead: 0,
-                    cacheWrite: 0,
-                    totalTokens: 0,
-                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-                  },
-                  stopReason: "stop",
-                  timestamp: 2,
-                },
-              });
-              setCliBackendForPrepareTest({'''
+                stopReason: "stop",
+                timestamp: 2,
+              },
+            });
+            setCliBackendForPrepareTest({'''
           if text.count(anchor) != 1:
-              raise SystemExit("red-test anchor mismatch")
+            raise SystemExit(f"red test anchor mismatch: {text.count(anchor)}")
           text = text.replace(anchor, replacement, 1)
           assertion_anchor = '''    expect(context.reusableCliSession).toEqual({ mode: "none" });
-              expect(transcriptCheck).not.toHaveBeenCalled();'''
+            expect(transcriptCheck).not.toHaveBeenCalled();'''
           assertion_replacement = '''    expect(context.reusableCliSession).toEqual({ mode: "none" });
-              expect(context.openClawHistoryPrompt).toContain("prior sessionless context");
-              expect(context.openClawHistoryPrompt).toContain("prior sessionless answer");
-              expect(context.openClawHistoryPrompt).toContain("stateless ask");
-              expect(transcriptCheck).not.toHaveBeenCalled();'''
+            expect(context.openClawHistoryPrompt).toContain("prior sessionless context");
+            expect(context.openClawHistoryPrompt).toContain("prior sessionless answer");
+            expect(context.openClawHistoryPrompt).toContain("stateless ask");
+            expect(transcriptCheck).not.toHaveBeenCalled();'''
           if text.count(assertion_anchor) != 1:
-              raise SystemExit("red assertion anchor mismatch")
+            raise SystemExit(f"red assertion anchor mismatch: {text.count(assertion_anchor)}")
           path.write_text(text.replace(assertion_anchor, assertion_replacement, 1))
           PY
-
-      - name: Prove regression is red before production edit
-        shell: bash
-        run: |
-          set -euo pipefail
           set +e
           pnpm test src/agents/cli-runner/prepare.test.ts > "$RUNNER_TEMP/red.log" 2>&1
           status=$?
@@ -114,16 +109,10 @@ jobs:
           fi
           grep -F 'ignores stored CLI session candidates when the backend disables sessions' "$RUNNER_TEMP/red.log" >/dev/null
           grep -F 'the given combination of arguments (undefined and string) is invalid for this assertion' "$RUNNER_TEMP/red.log" >/dev/null
-          grep -F 'src/agents/cli-runner/prepare.test.ts:4680:43' "$RUNNER_TEMP/red.log" >/dev/null
           echo "RED_PROOF=prepare.test.ts failed because openClawHistoryPrompt was undefined in the sessionless-history regression" >> "$GITHUB_ENV"
-
-      - name: Restore base after red proof
-        shell: bash
-        run: |
-          set -euo pipefail
           git reset --hard "$BASE_SHA"
 
-      - name: Apply final repair and policy regressions
+      - name: Apply final repair and regressions
         shell: bash
         run: |
           set -euo pipefail
@@ -131,35 +120,31 @@ jobs:
           from pathlib import Path
 
           def replace_once(path: str, old: str, new: str, label: str) -> None:
-              p = Path(path)
-              text = p.read_text()
-              count = text.count(old)
-              if count != 1:
-                  raise SystemExit(f"{label}: expected one anchor, found {count}")
-              p.write_text(text.replace(old, new, 1))
+            p = Path(path)
+            text = p.read_text()
+            count = text.count(old)
+            if count != 1:
+              raise SystemExit(f"{label}: expected one anchor, found {count}")
+            p.write_text(text.replace(old, new, 1))
+
+          def replace_between(path: str, start_marker: str, end_marker: str, replacement: str, label: str) -> None:
+            p = Path(path)
+            text = p.read_text()
+            start = text.find(start_marker)
+            if start < 0:
+              raise SystemExit(f"{label}: start marker not found")
+            end = text.find(end_marker, start)
+            if end < 0:
+              raise SystemExit(f"{label}: end marker not found")
+            end += len(end_marker)
+            p.write_text(text[:start] + replacement + text[end:])
 
           prepare = "src/agents/cli-runner/prepare.ts"
-          old_candidate = '''    const reusableCliSessionCandidate: CliReusableSession = ignoreCliSessionCandidate
-              ? { mode: "none" }
-              : controlOperationCliSessionId
-                ? { mode: "reuse", sessionId: controlOperationCliSessionId }
-                : params.cliSessionBinding
-                  ? resolveCliSessionReuse({
-                      binding: params.cliSessionBinding,
-                      authProfileId: effectiveAuthProfileId,
-                      authEpoch,
-                      authEpochVersion: CLI_AUTH_EPOCH_VERSION,
-                      extraSystemPromptHash,
-                      messageToolPolicyHash,
-                      promptToolNamesHash,
-                      cwdHash,
-                      mcpConfigHash: preparedBackendFinal.mcpConfigHash,
-                      mcpResumeHash: preparedBackendFinal.mcpResumeHash,
-                    })
-                  : params.cliSessionId
-                    ? { mode: "reuse", sessionId: params.cliSessionId }
-                    : { mode: "none" };'''
-          new_candidate = '''    const configuredCliSessionCandidate: CliReusableSession = isSideQuestion
+          replace_between(
+            prepare,
+            '    const reusableCliSessionCandidate: CliReusableSession = ignoreCliSessionCandidate\n',
+            '            : { mode: "none" };\n',
+            '''    const configuredCliSessionCandidate: CliReusableSession = isSideQuestion
               ? { mode: "none" }
               : controlOperationCliSessionId
                 ? { mode: "reuse", sessionId: controlOperationCliSessionId }
@@ -181,140 +166,169 @@ jobs:
                     : { mode: "none" };
             const reusableCliSessionCandidate: CliReusableSession = ignoreCliSessionCandidate
               ? { mode: "none" }
-              : configuredCliSessionCandidate;'''
-          replace_once(prepare, old_candidate, new_candidate, "configured session candidate")
+              : configuredCliSessionCandidate;
+''',
+            "configured session candidate",
+          )
 
-          old_reason = '''    const invalidatedReason = resolveCliSessionInvalidatedReason(reusableCliSession);
-            if (invalidatedReason) {'''
-          new_reason = '''    const invalidatedReason = resolveCliSessionInvalidatedReason(reusableCliSession);
+          replace_once(
+            prepare,
+            '''    const invalidatedReason = resolveCliSessionInvalidatedReason(reusableCliSession);
+            if (invalidatedReason) {''',
+            '''    const invalidatedReason = resolveCliSessionInvalidatedReason(reusableCliSession);
             const sessionlessRawReseedReason =
               !isSideQuestion &&
               !isControlOperation &&
               preparedBackendFinal.backend.sessionMode === "none"
                 ? (resolveCliSessionInvalidatedReason(configuredCliSessionCandidate) ?? "sessionless")
                 : undefined;
-            if (invalidatedReason) {'''
-          replace_once(prepare, old_reason, new_reason, "sessionless reason owner")
+            if (invalidatedReason) {''',
+            "sessionless reason owner",
+          )
 
-          old_raw = '''    const rawTranscriptReseedReason = reusableCliSessionId ? "session-expired" : invalidatedReason;'''
-          new_raw = '''    const rawTranscriptReseedReason = reusableCliSessionId
+          replace_once(
+            prepare,
+            '''    const rawTranscriptReseedReason = reusableCliSessionId ? "session-expired" : invalidatedReason;''',
+            '''    const rawTranscriptReseedReason = reusableCliSessionId
               ? "session-expired"
-              : (invalidatedReason ?? sessionlessRawReseedReason);'''
-          replace_once(prepare, old_raw, new_raw, "raw reseed selection")
+              : (invalidatedReason ?? sessionlessRawReseedReason);''',
+            "raw reseed selection",
+          )
 
           history = "src/agents/cli-runner/session-history.ts"
-          old_union = '''  | "orphaned-tool-use"
-            | "session-expired";'''
-          new_union = '''  | "orphaned-tool-use"
+          replace_once(
+            history,
+            '''  | "orphaned-tool-use"
+            | "session-expired";''',
+            '''  | "orphaned-tool-use"
             | "session-expired"
-            | "sessionless";'''
-          replace_once(history, old_union, new_union, "sessionless reason type")
-          old_allowed = '''  "mcp",
+            | "sessionless";''',
+            "sessionless reason type",
+          )
+          replace_once(
+            history,
+            '''  "mcp",
             "session-expired",
-          ]);'''
-          new_allowed = '''  "mcp",
+          ]);''',
+            '''  "mcp",
             "session-expired",
             "sessionless",
-          ]);'''
-          replace_once(history, old_allowed, new_allowed, "sessionless reason allowlist")
+          ]);''',
+            "sessionless reason allowlist",
+          )
 
           prepare_test = "src/agents/cli-runner/prepare.test.ts"
-          red_anchor = '''  it("ignores stored CLI session candidates when the backend disables sessions", async () => {
-              setCliBackendForPrepareTest({'''
-          red_replacement = '''  it("ignores stored CLI session candidates when the backend disables sessions", async () => {
-              fixture.appendTranscript({
-                id: "msg-sessionless-user",
-                parentId: null,
-                timestamp: new Date(1).toISOString(),
-                message: {
-                  role: "user",
-                  content: "prior sessionless context",
-                  timestamp: 1,
+          replace_once(
+            prepare_test,
+            '''  it("ignores stored CLI session candidates when the backend disables sessions", async () => {
+            setCliBackendForPrepareTest({''',
+            '''  it("ignores stored CLI session candidates when the backend disables sessions", async () => {
+            fixture.appendTranscript({
+              id: "msg-sessionless-user",
+              parentId: null,
+              timestamp: new Date(1).toISOString(),
+              message: {
+                role: "user",
+                content: "prior sessionless context",
+                timestamp: 1,
+              },
+            });
+            fixture.appendTranscript({
+              id: "msg-sessionless-assistant",
+              parentId: "msg-sessionless-user",
+              timestamp: new Date(2).toISOString(),
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "prior sessionless answer" }],
+                api: "responses",
+                provider: "test-cli",
+                model: "test-model",
+                usage: {
+                  input: 0,
+                  output: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                  totalTokens: 0,
+                  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
                 },
-              });
-              fixture.appendTranscript({
-                id: "msg-sessionless-assistant",
-                parentId: "msg-sessionless-user",
-                timestamp: new Date(2).toISOString(),
-                message: {
-                  role: "assistant",
-                  content: [{ type: "text", text: "prior sessionless answer" }],
-                  api: "responses",
-                  provider: "test-cli",
-                  model: "test-model",
-                  usage: {
-                    input: 0,
-                    output: 0,
-                    cacheRead: 0,
-                    cacheWrite: 0,
-                    totalTokens: 0,
-                    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-                  },
-                  stopReason: "stop",
-                  timestamp: 2,
-                },
-              });
-              setCliBackendForPrepareTest({'''
-          replace_once(prepare_test, red_anchor, red_replacement, "prepare regression setup")
-          assert_anchor = '''    expect(context.reusableCliSession).toEqual({ mode: "none" });
-              expect(transcriptCheck).not.toHaveBeenCalled();'''
-          assert_replacement = '''    expect(context.reusableCliSession).toEqual({ mode: "none" });
-              expect(context.openClawHistoryPrompt).toContain("prior sessionless context");
-              expect(context.openClawHistoryPrompt).toContain("prior sessionless answer");
-              expect(context.openClawHistoryPrompt).toContain("stateless ask");
-              expect(transcriptCheck).not.toHaveBeenCalled();'''
-          replace_once(prepare_test, assert_anchor, assert_replacement, "prepare regression assertions")
+                stopReason: "stop",
+                timestamp: 2,
+              },
+            });
+            setCliBackendForPrepareTest({''',
+            "prepare regression setup",
+          )
+          replace_once(
+            prepare_test,
+            '''    expect(context.reusableCliSession).toEqual({ mode: "none" });
+            expect(transcriptCheck).not.toHaveBeenCalled();''',
+            '''    expect(context.reusableCliSession).toEqual({ mode: "none" });
+            expect(context.openClawHistoryPrompt).toContain("prior sessionless context");
+            expect(context.openClawHistoryPrompt).toContain("prior sessionless answer");
+            expect(context.openClawHistoryPrompt).toContain("stateless ask");
+            expect(transcriptCheck).not.toHaveBeenCalled();''',
+            "prepare regression assertions",
+          )
 
           insert_anchor = '''  it("checks claude-cli transcript content under the resolved cwd", async () => {'''
           auth_test = '''  it("does not raw-reseed auth-boundary history for sessionless backends", async () => {
-              fixture.appendTranscript({
-                id: "msg-sessionless-auth",
-                parentId: null,
-                timestamp: new Date(1).toISOString(),
-                message: { role: "user", content: "previous credential context", timestamp: 1 },
-              });
-              setCliBackendForPrepareTest({
-                sessionMode: "none",
-                reseedFromRawTranscriptWhenUncompacted: true,
-              });
-              const transcriptCheck = vi.fn(async () => true);
-              const orphanCheck = vi.fn(async () => false);
-              setCliRunnerPrepareTestDeps({
-                claudeCliSessionTranscriptHasContent: transcriptCheck,
-                claudeCliSessionTranscriptHasOrphanedToolUse: orphanCheck,
-              });
-
-              const context = await fixture.prepare({
-                sessionKey: "agent:main:telegram:direct:peer",
-                prompt: "new credential ask",
-                provider: "claude-cli",
-                model: "opus",
-                cliSessionBinding: {
-                  sessionId: "stale-credential-session",
-                  authProfileId: "anthropic:old-profile",
-                },
-                cliSessionId: "stale-credential-session",
-              });
-
-              expect(context.reusableCliSession).toEqual({ mode: "none" });
-              expect(context.openClawHistoryPrompt).toBeUndefined();
-              expect(transcriptCheck).not.toHaveBeenCalled();
-              expect(orphanCheck).not.toHaveBeenCalled();
+            fixture.appendTranscript({
+              id: "msg-sessionless-auth",
+              parentId: null,
+              timestamp: new Date(1).toISOString(),
+              message: { role: "user", content: "previous credential context", timestamp: 1 },
+            });
+            setCliBackendForPrepareTest({
+              sessionMode: "none",
+              reseedFromRawTranscriptWhenUncompacted: true,
+            });
+            const transcriptCheck = vi.fn(async () => true);
+            const orphanCheck = vi.fn(async () => false);
+            setCliRunnerPrepareTestDeps({
+              claudeCliSessionTranscriptHasContent: transcriptCheck,
+              claudeCliSessionTranscriptHasOrphanedToolUse: orphanCheck,
             });
 
-          ''' + insert_anchor
+            const context = await fixture.prepare({
+              sessionKey: "agent:main:telegram:direct:peer",
+              prompt: "new credential ask",
+              provider: "claude-cli",
+              model: "opus",
+              cliSessionBinding: {
+                sessionId: "stale-credential-session",
+                authProfileId: "anthropic:old-profile",
+              },
+              cliSessionId: "stale-credential-session",
+            });
+
+            expect(context.reusableCliSession).toEqual({ mode: "none" });
+            expect(context.openClawHistoryPrompt).toBeUndefined();
+            expect(transcriptCheck).not.toHaveBeenCalled();
+            expect(orphanCheck).not.toHaveBeenCalled();
+          });
+
+''' + insert_anchor
           replace_once(prepare_test, insert_anchor, auth_test, "sessionless auth-boundary regression")
 
           history_test = "src/agents/cli-runner/session-history.test.ts"
-          table_anchor = '''    "mcp",
-              "session-expired",
-            ] as const)("raw-reseeds consecutive user rows for %s only with opt-in", async (reason) => {'''
-          table_replacement = '''    "mcp",
-              "session-expired",
-              "sessionless",
-            ] as const)("raw-reseeds consecutive user rows for %s only with opt-in", async (reason) => {'''
-          replace_once(history_test, table_anchor, table_replacement, "sessionless policy coverage")
+          replace_once(
+            history_test,
+            '''    "mcp",
+            "session-expired",
+          ] as const)("raw-reseeds consecutive user rows for %s only with opt-in", async (reason) => {''',
+            '''    "mcp",
+            "session-expired",
+            "sessionless",
+          ] as const)("raw-reseeds consecutive user rows for %s only with opt-in", async (reason) => {''',
+            "sessionless policy coverage",
+          )
           PY
+
+          pnpm exec oxfmt --write \
+            src/agents/cli-runner/prepare.ts \
+            src/agents/cli-runner/prepare.test.ts \
+            src/agents/cli-runner/session-history.ts \
+            src/agents/cli-runner/session-history.test.ts
 
       - name: Run focused validation
         shell: bash
@@ -358,7 +372,6 @@ jobs:
             src/agents/cli-runner/session-history.test.ts
           git commit -m "fix(cli): reseed history for sessionless turns"
           final_sha="$(git rev-parse HEAD)"
-          echo "FINAL_SHA=$final_sha" >> "$GITHUB_ENV"
           git push origin "HEAD:refs/heads/$TARGET_BRANCH" \
             --force-with-lease="refs/heads/$TARGET_BRANCH:${GITHUB_SHA}"
           echo "Final commit: $final_sha" >> "$GITHUB_STEP_SUMMARY"
